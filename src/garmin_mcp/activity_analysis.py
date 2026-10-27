@@ -643,38 +643,78 @@ def _compute_power_duration_curve(records: List[Dict]) -> Optional[Dict]:
     powers = [r.get("power_w") for r in records]
     if not any(p is not None for p in powers):
         return None
+    gaps = _record_gaps_s(records)
+    from itertools import accumulate, chain, repeat
+    from operator import mul, sub
 
-    # Fill None gaps with 0 (coasting) for window computation. Each sample is
-    # held until the next record; a pause counts as 0 W rather than inventing
-    # power, and zeros beyond the longest window cannot change any result.
-    filled: List[float] = []
-    for p, gap in zip(powers, _record_gaps_s(records)):
-        held = _held_seconds(gap)
-        filled.extend([p if p is not None else 0] * held)
-        filled.extend([0] * min(gap - held, _PDC_DURATIONS_S[-1]))
-    n = len(filled)
-    if n == 0:
-        return None
+    # Exact integer arithmetic permits one prefix entry per sample when
+    # sampling is uniform. Other values retain per-second addition order.
+    stride = 1
+    if (
+        gaps
+        and 1 < gaps[0] <= _MAX_RECORD_GAP_S
+        and all(gap == gaps[0] for gap in gaps)
+        and all(p is None or type(p) is int for p in powers)
+    ):
+        stride = gaps[0]
 
-    # Precompute prefix sums for O(1) window queries
-    prefix = [0] * (n + 1)
-    for i, p in enumerate(filled):
-        prefix[i + 1] = prefix[i] + p
+    if stride > 1:
+        values = [p if p is not None else 0 for p in powers]
+        prefix = list(accumulate(map(mul, values, repeat(stride)), initial=0))
+        phases = {0: prefix}
+        n = len(values) * stride
+    else:
+        # Hold each sample until the next record and zero-fill pauses.
+        if all(gap == 1 for gap in gaps):
+            filled = [p if p is not None else 0 for p, _ in zip(powers, gaps)]
+        elif all(gap <= _MAX_RECORD_GAP_S for gap in gaps):
+            filled = list(chain.from_iterable(
+                repeat(p if p is not None else 0, gap)
+                for p, gap in zip(powers, gaps)
+            ))
+        else:
+            filled: List[float] = []
+            for p, gap in zip(powers, gaps):
+                held = _held_seconds(gap)
+                filled.extend([p if p is not None else 0] * held)
+                filled.extend([0] * min(gap - held, _PDC_DURATIONS_S[-1]))
+        n = len(filled)
+        if n == 0:
+            return None
+        prefix = list(accumulate(filled, initial=0))
 
     curve: Dict[str, Any] = {}
     for duration_s, label in zip(_PDC_DURATIONS_S, _PDC_LABELS):
         if n < duration_s:
             continue
-        best = 0
-        for i in range(n - duration_s + 1):
-            window_sum = prefix[i + duration_s] - prefix[i]
-            if window_sum > best:
-                best = window_sum
+        if stride > 1:
+            samples, remainder = divmod(duration_s, stride)
+            if remainder:
+                # Maximal windows touch a sample boundary at either end.
+                if remainder not in phases:
+                    phases[remainder] = [
+                        total + remainder * p for total, p in zip(prefix, values)
+                    ]
+                offset = stride - remainder
+                if offset not in phases:
+                    phases[offset] = [
+                        total + offset * p for total, p in zip(prefix, values)
+                    ]
+                windows = chain(
+                    map(sub, phases[remainder][samples:], prefix),
+                    map(sub, prefix[samples + 1:], phases[offset]),
+                )
+            else:
+                windows = map(sub, prefix[samples:], prefix)
+            best = max(chain((0,), windows))
+        else:
+            best = max(chain((0,), map(sub, prefix[duration_s:], prefix)))
         best_avg = best / duration_s
         if best_avg > 0:
             curve[label] = round(best_avg)
 
     return curve if curve else None
+
 
 
 # ---------------------------------------------------------------------------
