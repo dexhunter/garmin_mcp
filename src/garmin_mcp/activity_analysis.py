@@ -693,15 +693,54 @@ def _record_gaps_s(records: List[Dict]) -> List[int]:
     per record (the 1 Hz assumption) when a timestamp is missing or
     unparseable or the timestamps go backwards.
     """
-    times = [_parse_fit_timestamp(r.get("timestamp")) for r in records]
-    if any(t is None for t in times):
+    times = []
+    fromisoformat = datetime.datetime.fromisoformat
+    utc = datetime.timezone.utc
+    missing = False
+    native_times = True
+    datetime_type = datetime.datetime
+    value_type = type
+    for record in records:
+        value = record.get("timestamp")
+        if value_type(value) is str:
+            try:
+                ts = fromisoformat(value.replace("Z", "+00:00"))
+            except (TypeError, ValueError):
+                ts = None
+                missing = True
+            else:
+                if ts.tzinfo is not None:
+                    ts = ts.astimezone(utc).replace(tzinfo=None)
+        elif value_type(value) is datetime_type:
+            ts = value
+            if ts.tzinfo is not None:
+                ts = ts.astimezone(utc).replace(tzinfo=None)
+        else:
+            ts = _parse_fit_timestamp(value)
+            if value_type(ts) is not datetime_type:
+                native_times = False
+                if ts is None:
+                    missing = True
+        times.append(ts)
+    if missing:
         return [1] * len(records)
-    gaps = [int((b - a).total_seconds()) for a, b in zip(times, times[1:])]
-    if any(g < 0 for g in gaps):
+    # Exact datetimes produce native timedeltas; subclasses retain their
+    # original subtraction and total_seconds conversion behavior.
+    if native_times:
+        gaps = [
+            delta.seconds
+            if not (delta := b - a).days
+            else int(delta.total_seconds())
+            for a, b in zip(times, times[1:])
+        ]
+    else:
+        gaps = [int((b - a).total_seconds()) for a, b in zip(times, times[1:])]
+    if min(gaps, default=0) < 0:
         return [1] * len(records)
     if not records:
         return []
-    return gaps + [_held_seconds(gaps[-1]) if gaps else 1]
+    gaps.append(_held_seconds(gaps[-1]) if gaps else 1)
+    return gaps
 
 
 def _held_seconds(gap_s: int) -> int:
