@@ -611,18 +611,26 @@ def _safe_round(value, ndigits: int = 1) -> Optional[float]:
 
 def _parse_fit_timestamp(value) -> Optional[datetime.datetime]:
     """Parse a FIT timestamp (datetime or its str()) as naive UTC, or None."""
-    if isinstance(value, datetime.datetime):
-        ts = value
-    else:
+    if type(value) is not str:
+        if isinstance(value, datetime.datetime):
+            if value.tzinfo is not None:
+                return value.astimezone(datetime.timezone.utc).replace(tzinfo=None)
+            return value
         if not value:
             return None
         try:
-            ts = datetime.datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+            value = str(value).replace("Z", "+00:00")
         except (TypeError, ValueError):
             return None
-    if ts.tzinfo is not None:
-        ts = ts.astimezone(datetime.timezone.utc).replace(tzinfo=None)
-    return ts
+    else:
+        value = value.replace("Z", "+00:00") if "Z" in value else value
+    try:
+        ts = datetime.datetime.fromisoformat(value)
+    except (TypeError, ValueError):
+        return None
+    if ts.tzinfo is None:
+        return ts
+    return ts.astimezone(datetime.timezone.utc).replace(tzinfo=None)
 
 
 # ---------------------------------------------------------------------------
